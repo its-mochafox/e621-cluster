@@ -1,0 +1,56 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - run: helm lint charts/e621
+
+      - name: Render with defaults
+        run: |
+          mkdir -p rendered
+          helm template ci charts/e621 > rendered/default.yaml
+
+      - name: Render with external dependencies and a single jobs group
+        run: |
+          helm template ci charts/e621 \
+            --set postgres.enabled=false \
+            --set postgres.external.host=pg.example.com \
+            --set redis.enabled=false \
+            --set redis.external.url=redis://redis.example.com:6379/0 \
+            --set opensearch.enabled=false \
+            --set opensearch.external.host=os.example.com \
+            --set memcached.enabled=false \
+            --set memcached.external.servers=mc.example.com:11211 \
+            --set iqdb.enabled=false \
+            --set autocompleted.enabled=false \
+            --set sitemap.enabled=true \
+            --set storage.data.existingClaim=post-data \
+            > rendered/external.yaml
+
+      # Rendered into the workspace rather than /tmp because container actions
+      # only get the workspace mounted.
+      - name: Validate against the Kubernetes schemas
+        uses: docker://ghcr.io/yannh/kubeconform:latest-alpine
+        with:
+          args: -strict -summary -kubernetes-version 1.30.0 rendered/default.yaml rendered/external.yaml
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh
