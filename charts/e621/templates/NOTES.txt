@@ -1,0 +1,38 @@
+e621 {{ .Values.image.tag | default .Chart.AppVersion }} deployed as {{ include "e621.fullname" . }}.
+
+Service:
+  {{ include "e621.fullname" . }}-web:{{ .Values.web.service.port }}
+
+TLS terminates outside the cluster. Point your proxy at that Service and make
+sure it sends traffic for {{ .Values.hostname }}.
+
+Check rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "e621.fullname" . }}-web
+{{- if .Values.bootstrap.enabled }}
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "e621.fullname" . }}-bootstrap
+{{- end }}
+
+{{ if and .Values.bootstrap.enabled .Values.bootstrap.seed -}}
+The seed created an "admin" account with the upstream default password.
+Change it before exposing this to the internet.
+{{ end -}}
+
+Rails console:
+  kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "e621.fullname" . }}-web -c e621 -- bundle exec rails console
+
+Take one web pod out of rotation without restarting it:
+  kubectl -n {{ .Release.Namespace }} exec <pod> -c e621 -- bin/drain true
+
+{{- if not .Values.storage.data.existingClaim }}
+{{- if not (has "ReadWriteMany" .Values.storage.data.accessModes) }}
+
+WARNING: storage.data.accessModes does not include ReadWriteMany. The web pods,
+every jobs group and the nginx sidecars all mount this claim. Unless they are
+all pinned to one node, scheduling will fail.
+{{- end }}
+{{- end }}
+{{- if eq .Values.hostname "e621.example.com" }}
+
+WARNING: hostname is still the default. It drives route URLs, mailer links, the
+sitemap and the storage manager base URL, so nothing will link correctly.
+{{- end }}
