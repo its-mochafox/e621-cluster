@@ -119,6 +119,11 @@ jobs:
 
   bump:
     needs: [resolve, build]
+    # Also runs when the build was skipped because the image already existed.
+    # Without this, a bump that failed once would never be retried until
+    # upstream happened to move again. create-pull-request is a no-op when the
+    # chart already points at the right tag.
+    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
