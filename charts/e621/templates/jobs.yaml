@@ -1,0 +1,87 @@
+{{- $root := . -}}
+{{- range .Values.jobs.groups }}
+---
+# Sidekiq worker group "{{ .name }}".
+#
+# Groups exist so queues with different resource profiles can be sized
+# independently: `video` shells out to ffmpeg and `thumb` to libvips, while the
+# rest are mostly database-bound.
+#
+# sidekiq-cron loads its schedule in every sidekiq process and elects a single
+# enqueuer through Redis, so running multiple groups and replicas does not
+# duplicate the scheduled jobs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "e621.fullname" $root }}-jobs-{{ .name }}
+  labels:
+    {{- include "e621.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: jobs
+    e621.mochafox.com/queue-group: {{ .name }}
+spec:
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      {{- include "e621.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: jobs
+      e621.mochafox.com/queue-group: {{ .name }}
+  template:
+    metadata:
+      annotations:
+        checksum/local-config: {{ include (print $root.Template.BasePath "/configmap-local-config.yaml") $root | sha256sum }}
+        {{- with $root.Values.app.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "e621.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: jobs
+        e621.mochafox.com/queue-group: {{ .name }}
+    spec:
+      serviceAccountName: {{ include "e621.serviceAccountName" $root }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.securityContext | nindent 8 }}
+      # config/sidekiq.yml sets a 30s job timeout; leave room for it plus the
+      # in-flight job to finish before SIGKILL.
+      terminationGracePeriodSeconds: 60
+      {{- with $root.Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.app.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "e621.waitForDeps" $root | nindent 8 }}
+      containers:
+        - name: sidekiq
+          image: {{ include "e621.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: ["bundle", "exec", "sidekiq"]
+          env:
+            {{- include "e621.commonEnv" $root | nindent 12 }}
+            # Semicolon-separated queue:weight pairs, parsed by config/sidekiq.yml.
+            - name: SIDEKIQ_QUEUES
+              value: {{ .queues | quote }}
+            # Must stay below jobs.dbWorkerPoolSize ({{ $root.Values.jobs.dbWorkerPoolSize }})
+            # or workers will contend for ActiveRecord connections.
+            - name: SIDEKIQ_CONCURRENCY
+              value: {{ .concurrency | quote }}
+          # Sidekiq exposes no HTTP endpoint to probe. Queue depth and worker
+          # liveness are visible in the Sidekiq web UI at /sidekiq, which the app
+          # mounts behind an admin-only route constraint.
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+          volumeMounts:
+            {{- include "e621.appVolumeMounts" $root | nindent 12 }}
+      volumes:
+        {{- include "e621.appVolumes" $root | nindent 8 }}
+{{- end }}
