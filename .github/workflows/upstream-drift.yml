@@ -1,0 +1,91 @@
+name: Upstream drift
+
+# This repo deliberately contains no upstream source, so nothing merges and
+# nothing conflicts. The tradeoff is that upstream can change something the
+# chart depends on without anything breaking loudly. This job watches the
+# handful of files that matter and opens a PR when they move.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the tracked upstream files
+        env:
+          BASE: https://raw.githubusercontent.com/e621ng/e621ng/master
+        run: |
+          set -euo pipefail
+          curl -fsSL "$BASE/docker-compose.yml"              -o upstream/docker-compose.yml
+          curl -fsSL "$BASE/docker/default.conf.template"    -o upstream/default.conf.template
+          curl -fsSL "$BASE/config/sidekiq.yml"              -o upstream/sidekiq.yml
+          curl -fsSL "$BASE/config/database.yml"             -o upstream/database.yml
+          curl -fsSL "$BASE/Procfile"                        -o upstream/Procfile
+          curl -fsSL "$BASE/Dockerfile"                      -o upstream/Dockerfile
+
+      - name: Summarise the drift
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- upstream/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no drift"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo 'diff<<DIFF_EOF'
+            git diff -- upstream/
+            echo 'DIFF_EOF'
+          } >> "$GITHUB_OUTPUT"
+          git diff --stat -- upstream/
+
+      - name: Open the drift PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/upstream-drift
+          base: main
+          commit-message: "Re-baseline upstream snapshots"
+          title: "Upstream changed a file the chart depends on"
+          body: |
+            Upstream master has changed one or more of the files this chart is
+            derived from. Nothing is broken yet; this is the signal to look.
+
+            What to check, by file:
+
+            - `docker-compose.yml` - pinned versions for postgres, redis, opensearch,
+              memcached, iqdb and autocompleted. Mirror any bumps into `values.yaml`.
+            - `default.conf.template` - the nginx config is vendored into
+              `charts/e621/templates/configmap-nginx.yaml` because `.dockerignore`
+              keeps it out of the production image. Port the change across, keeping
+              the documented deltas (listen 8080, loopback upstream, hardcoded
+              `X-Forwarded-Proto: https`, `Host $host`).
+            - `sidekiq.yml` - a new required variable or a changed queue format
+              means `values.jobs.groups` needs updating.
+            - `database.yml` - new `DB_*` variables, or a change to the hardcoded
+              `e621` role and database names.
+            - `Procfile` - reference queue weights.
+            - `Dockerfile` - changes to the production target, the runtime uid, the
+              default command, or the `GIT_TAG` build arg.
+
+            Merging re-baselines the snapshots, so only merge once the chart has
+            caught up.
+
+            <details><summary>Diff</summary>
+
+            ```diff
+            ${{ steps.diff.outputs.diff }}
+            ```
+
+            </details>
+          delete-branch: true
