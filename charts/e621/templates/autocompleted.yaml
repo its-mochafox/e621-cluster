@@ -1,0 +1,79 @@
+{{- if .Values.autocompleted.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "e621.fullname" . }}-autocompleted
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: autocompleted
+spec:
+  ports:
+    - name: http
+      port: 8118
+      targetPort: http
+  selector:
+    {{- include "e621.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: autocompleted
+---
+# Standalone service answering /tags/autocomplete.json. Rails has no route for
+# that path at all; the nginx sidecar proxies it here. It talks to Postgres
+# directly and holds no state of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "e621.fullname" . }}-autocompleted
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: autocompleted
+spec:
+  replicas: {{ .Values.autocompleted.replicas }}
+  selector:
+    matchLabels:
+      {{- include "e621.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: autocompleted
+  template:
+    metadata:
+      labels:
+        {{- include "e621.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: autocompleted
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: autocompleted
+          image: {{ .Values.autocompleted.image }}
+          imagePullPolicy: {{ .Values.autocompleted.pullPolicy }}
+          command: ["/app/autocompleted"]
+          env:
+            # Upstream's compose file uses the service name here, which only
+            # binds that one interface. In a pod it has to bind all of them.
+            - name: SERVER_ADDR
+              value: "0.0.0.0:8118"
+            - name: PG__USER
+              value: e621
+            - name: PG__DBNAME
+              value: e621
+            - name: PG__HOST
+              value: {{ include "e621.postgres.host" . | quote }}
+            - name: PG__PORT
+              value: {{ include "e621.postgres.port" . | quote }}
+            - name: PG__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: db-password
+            - name: PG__POOL__MAX_SIZE
+              value: {{ .Values.autocompleted.pgPoolMaxSize | quote }}
+          ports:
+            - name: http
+              containerPort: 8118
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.autocompleted.resources | nindent 12 }}
+{{- end }}

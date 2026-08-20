@@ -1,0 +1,76 @@
+{{- if .Values.iqdb.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "e621.fullname" . }}-iqdb
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: iqdb
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 5588
+      targetPort: http
+  selector:
+    {{- include "e621.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: iqdb
+---
+# Reverse image search. Backed by a single on-disk database file with no
+# replication story, so this is deliberately a one-replica StatefulSet.
+# Rails degrades gracefully when it is unreachable: IqdbProxy has a circuit
+# breaker that trips after repeated failures.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "e621.fullname" . }}-iqdb
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: iqdb
+spec:
+  serviceName: {{ include "e621.fullname" . }}-iqdb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "e621.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: iqdb
+  template:
+    metadata:
+      labels:
+        {{- include "e621.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: iqdb
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: iqdb
+          image: {{ .Values.iqdb.image }}
+          imagePullPolicy: {{ .Values.iqdb.pullPolicy }}
+          command: ["iqdb", "http", "0.0.0.0", "5588", {{ .Values.iqdb.dbFile | quote }}]
+          ports:
+            - name: http
+              containerPort: 5588
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.iqdb.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /iqdb
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.iqdb.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.iqdb.persistence.size }}
+{{- end }}

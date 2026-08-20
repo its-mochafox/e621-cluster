@@ -1,0 +1,60 @@
+{{- if .Values.memcached.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "e621.fullname" . }}-memcached
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memcached
+spec:
+  ports:
+    - name: memcached
+      port: 11211
+      targetPort: memcached
+  selector:
+    {{- include "e621.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: memcached
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "e621.fullname" . }}-memcached
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memcached
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "e621.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: memcached
+  template:
+    metadata:
+      labels:
+        {{- include "e621.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: memcached
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsUser: 11211
+        runAsGroup: 11211
+        runAsNonRoot: true
+      containers:
+        - name: memcached
+          image: {{ .Values.memcached.image }}
+          imagePullPolicy: {{ .Values.memcached.pullPolicy }}
+          args: ["-m", {{ .Values.memcached.memoryLimitMb | quote }}]
+          ports:
+            - name: memcached
+              containerPort: 11211
+          livenessProbe:
+            tcpSocket:
+              port: memcached
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.memcached.resources | nindent 12 }}
+{{- end }}
