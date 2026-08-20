@@ -71,12 +71,16 @@ jobs:
             echo "forced rebuild"
             exit 0
           fi
+          # The package is private, so an unauthenticated manifest inspect
+          # always fails and would make every run a full rebuild.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           if docker manifest inspect \
               "${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.tag }}" >/dev/null 2>&1; then
             echo "needs_build=false" >> "$GITHUB_OUTPUT"
             echo "already built, nothing to do"
           else
             echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            echo "not published yet, building"
           fi
 
   build:
