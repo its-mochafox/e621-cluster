@@ -1,0 +1,87 @@
+{{- if .Values.bootstrap.enabled }}
+# One-shot bootstrap, run once after the initial install.
+#
+# Every step is idempotent, so a manual re-run is harmless:
+#   * db:schema:load is skipped when the public schema already has tables.
+#     Guarding it matters: it drops and recreates everything.
+#   * create_index! returns early when the index already exists.
+#   * db/seeds.rb uses find_or_create_by!.
+#
+# Creating the OpenSearch indices is a genuinely separate step that
+# db:schema:load does not cover. Without it, every post query fails.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "e621.fullname" . }}-bootstrap
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "0"
+    # Failed jobs are kept so the logs survive for debugging.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  # Bounded so a missing dependency fails the install instead of hanging on the
+  # wait-for-deps loop forever.
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        {{- include "e621.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "e621.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      initContainers:
+        {{- include "e621.waitForDeps" . | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "e621.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              export PGPASSWORD="$DB_PASSWORD"
+              TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U e621 -d e621 -tAc \
+                "select count(*) from information_schema.tables where table_schema = 'public'")
+
+              if [ "$TABLES" -gt 0 ]; then
+                echo "schema already present ($TABLES tables), skipping db:schema:load"
+              else
+                echo "loading db/structure.sql"
+                bundle exec rails db:schema:load
+              fi
+
+              echo "creating opensearch indices"
+              bundle exec rails runner '[Post, PostVersion].each { |m| m.document_store.create_index! }'
+
+              {{- if .Values.bootstrap.seed }}
+              echo "seeding"
+              bundle exec rails db:seed
+              {{- end }}
+
+              echo "bootstrap complete"
+          env:
+            {{- include "e621.commonEnv" . | nindent 12 }}
+            {{- if .Values.bootstrap.seed }}
+            # bin/setup seeds with throttles off; the seed user creations trip
+            # them otherwise.
+            - name: DANBOORU_DISABLE_THROTTLES
+              value: "true"
+            {{- end }}
+          volumeMounts:
+            {{- include "e621.appVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "e621.appVolumes" . | nindent 8 }}
+{{- end }}

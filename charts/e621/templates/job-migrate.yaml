@@ -1,0 +1,48 @@
+{{- if .Values.migrate.enabled }}
+# Runs db:migrate before the new pods roll out.
+#
+# Upstream sets schema_format = :sql, so migrations apply against
+# db/structure.sql rather than schema.rb, and dump_schema_after_migration is
+# disabled in production.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "e621.fullname" . }}-migrate
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "e621.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "e621.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      initContainers:
+        {{- include "e621.waitForDeps" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "e621.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bundle", "exec", "rails", "db:migrate"]
+          env:
+            {{- include "e621.commonEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "e621.appVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "e621.appVolumes" . | nindent 8 }}
+{{- end }}
