@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "e621.fullname" . }}-nginx
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+data:
+  # The stock nginx.conf hardcodes `pid /var/run/nginx.pid`, which uid 101
+  # cannot write, and `-g "pid ..."` is rejected as a duplicate directive. So
+  # replace the main config wholesale. /var/cache/nginx is root-owned in the
+  # official image, so the temp paths move to the /tmp emptyDir as well.
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+
+    # Both of these are symlinks to the container's stdout/stderr in the
+    # official image.
+    error_log /var/log/nginx/error.log notice;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+      access_log /var/log/nginx/access.log main;
+
+      sendfile      on;
+      tcp_nopush    on;
+      server_tokens off;
+      keepalive_timeout 65;
+
+      include /etc/nginx/conf.d/*.conf;
+    }
+
+  # Derived from upstream docker/default.conf.template. That file is excluded
+  # from the production image by .dockerignore, so it cannot be read out of the
+  # image at runtime and has to be vendored here instead. The
+  # upstream-drift workflow opens an issue whenever upstream changes it.
+  #
+  # Deltas from upstream, all deliberate:
+  #   * listen 8080          - nginx runs as the unprivileged uid 101
+  #   * upstream 127.0.0.1   - nginx is a sidecar, not a separate Deployment
+  #   * X-Forwarded-Proto    - hardcoded https, see below
+  #   * Host $host           - upstream leaks the internal port into Host
+  #   * autocompleted target - Kubernetes Service name
+  #   * sitemap alias        - optional, see values.sitemap
+  default.conf.template: |
+    limit_req_zone $binary_remote_addr zone=openpanel:10m rate=10r/s;
+
+    server {
+      listen 8080;
+      server_name _;
+      root /app/public;
+      index index.html;
+      access_log off;
+      client_max_body_size 100m;
+
+      location /data {
+        expires max;
+        break;
+      }
+
+      location /data/download/deleted/ {
+        return 403;
+      }
+
+      location /data/download/replacements/ {
+        return 403;
+      }
+
+      location /data/download/staff_files/ {
+        return 403;
+      }
+
+      location /data/download/ {
+        alias /app/public/data/;
+        add_header Content-Disposition 'attachment; filename="$arg_filename"';
+        expires max;
+      }
+
+      # The three secure_link blocks below are the only thing preventing public
+      # access to deleted posts, pending replacements and staff files. Rails does
+      # not enforce this itself, so nginx cannot be dropped from the pod.
+      location /data/deleted/ {
+        add_header Cache-Control "private";
+        secure_link $arg_auth,$arg_expires;
+        secure_link_md5 "$secure_link_expires $uri $arg_uid ${DANBOORU_PROTECTED_FILE_SECRET}";
+        if ($secure_link = "") {
+          return 403;
+        }
+        if ($secure_link = "0") {
+          return 403;
+        }
+      }
+
+      location /data/replacements/ {
+        add_header Cache-Control "private";
+        secure_link $arg_auth,$arg_expires;
+        secure_link_md5 "$secure_link_expires $uri $arg_uid ${DANBOORU_REPLACEMENT_FILE_SECRET}";
+        if ($secure_link = "") {
+          return 403;
+        }
+        if ($secure_link = "0") {
+          return 403;
+        }
+      }
+
+      location /data/staff_files/ {
+        add_header Cache-Control "private";
+        secure_link $arg_auth,$arg_expires;
+        secure_link_md5 "$secure_link_expires $uri $arg_uid ${DANBOORU_STAFF_FILE_SECRET}";
+        if ($secure_link = "") {
+          return 403;
+        }
+        if ($secure_link = "0") {
+          return 403;
+        }
+      }
+{{- if .Values.sitemap.enabled }}
+
+      # SitemapGeneratorJob writes here instead of public/, see the local-config
+      # ConfigMap. robots.txt advertises /sitemap.xml.gz.
+      location ~ ^/(sitemap[^/]*\.xml\.gz)$ {
+        alias /app/public/data/sitemaps/$1;
+        expires 1h;
+      }
+{{- end }}
+
+{{- if .Values.autocompleted.enabled }}
+
+      # Rails has no route for this path; it is served entirely by the
+      # standalone autocompleted service, which queries Postgres directly.
+      location /tags/autocomplete.json {
+        proxy_pass http://{{ include "e621.fullname" . }}-autocompleted:8118/;
+        proxy_redirect off;
+      }
+{{- end }}
+
+      location @app_server {
+        proxy_pass http://app_server;
+        proxy_redirect off;
+        proxy_read_timeout 180s;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $server_port;
+{{- if .Values.web.nginx.assumeSsl }}
+        # config.force_ssl is on and config.assume_ssl is development-only
+        # upstream, so RAILS_ASSUME_SSL does nothing in production. TLS is
+        # terminated outside the cluster; forwarding $scheme here would report
+        # http and send every request into a permanent redirect loop.
+        proxy_set_header X-Forwarded-Proto https;
+{{- else }}
+        proxy_set_header X-Forwarded-Proto $scheme;
+{{- end }}
+      }
+
+      location / {
+        try_files $uri @app_server;
+      }
+
+      error_page 404 /404.html;
+      error_page 500 502 503 504 /500.html;
+    }
+
+    upstream app_server {
+      server 127.0.0.1:9000;
+    }
