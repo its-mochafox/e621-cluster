@@ -1,0 +1,14 @@
+# Local helm output
+rendered/
+*.tgz
+
+# Never commit a real Secret. scripts/gen-secrets.sh writes to stdout for a
+# reason.
+secrets.yaml
+*.secret.yaml
+
+# Local value overrides
+values.local.yaml
+*-values.yaml
+
+.DS_Store

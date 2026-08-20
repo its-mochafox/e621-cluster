@@ -1,0 +1,327 @@
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+# Built from the upstream e621ng master branch by .github/workflows/build-upstream.yml.
+# The tag is an immutable `master-<short-sha>`; CI opens a PR to bump it here.
+image:
+  repository: ghcr.io/realmochafox/e621ng
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The GHCR package is private, so a pull secret is required.
+# kubectl create secret docker-registry ghcr \
+#   --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT with read:packages>
+imagePullSecrets:
+  - name: ghcr
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# Core settings
+# -----------------------------------------------------------------------------
+
+# Public hostname. Drives route URLs, mailer host, sitemap host, OIDC issuer and
+# the storage manager base_url. No scheme, no trailing slash.
+hostname: e621.example.com
+
+# Name of a Secret you create out-of-band holding every sensitive value.
+# Run scripts/gen-secrets.sh to produce it. Keys are listed in docs/secrets.md.
+existingSecret: e621-secrets
+
+# The app image bakes an unprivileged user at uid/gid 1000 and pre-chowns
+# /app/tmp, /app/log and /app/public/data to it. Changing these will break
+# those directories unless you also rebuild the image with matching
+# APP_UID/APP_GID build args.
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  runAsNonRoot: true
+  fsGroup: 1000
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Applied to web, jobs and the bootstrap/migrate Jobs.
+app:
+  # Extra env vars appended to every app container. List of core-v1 EnvVar.
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Rails log level. The upstream production default is "error", which is
+  # unhelpfully quiet in a cluster.
+  logLevel: info
+
+# -----------------------------------------------------------------------------
+# Web (pitchfork + nginx sidecar)
+# -----------------------------------------------------------------------------
+# nginx runs as a sidecar rather than its own Deployment on purpose: vite emits
+# content-hashed asset filenames, so a separately-scaled nginx would serve stale
+# hashes to HTML rendered by freshly-rolled web pods. An initContainer copies
+# /app/public out of the app image into a shared emptyDir, which keeps assets and
+# app code atomically versioned within each pod.
+web:
+  replicas: 2
+
+  # pitchfork recycles workers between 386MB and 768MB PSS. Size memory limits
+  # above roughly (768Mi * workerCount) + overhead or the kernel OOM killer wins
+  # before the graceful recycler does.
+  workerCount: 4
+
+  # ActiveRecord pool for web pods. Must be >= workerCount.
+  dbPoolSize: 8
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  nginx:
+    image: nginx:stable-alpine
+    pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    # TLS is terminated outside the cluster, so nginx tells Rails the original
+    # scheme was https. Without this, config.force_ssl = true 301-redirects every
+    # request forever. config.assume_ssl is development-only upstream, so
+    # RAILS_ASSUME_SSL cannot be used instead.
+    assumeSsl: true
+
+  # emptyDir sizes for the copied assets and scratch space.
+  assetsSizeLimit: 2Gi
+  tmpSizeLimit: 10Gi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# -----------------------------------------------------------------------------
+# Sidekiq workers
+# -----------------------------------------------------------------------------
+# Split by resource profile. `video` and `thumb` shell out to ffmpeg and libvips
+# and behave very differently from the rest. sidekiq-cron registers its schedule
+# in every sidekiq process and elects a single enqueuer through Redis, so it is
+# safe to run several groups and replicas.
+jobs:
+  # ActiveRecord pool for worker pods. Must be >= the group's concurrency.
+  dbWorkerPoolSize: 16
+
+  groups:
+    - name: general
+      replicas: 1
+      # Semicolon-separated `queue:weight`, exactly as upstream's Procfile.
+      queues: "low_prio:1;iqdb:1;tags:2;default:3;high_prio:5"
+      concurrency: 10
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          memory: 2Gi
+
+    - name: media
+      replicas: 1
+      queues: "video:1;thumb:1"
+      concurrency: 4
+      resources:
+        requests:
+          cpu: 1000m
+          memory: 2Gi
+        limits:
+          memory: 4Gi
+
+# -----------------------------------------------------------------------------
+# Post data storage
+# -----------------------------------------------------------------------------
+# Mounted at /app/public/data on web, every jobs group and the nginx sidecar.
+# Jobs write originals, previews, samples, crops and video variants; web writes
+# avatars and replacements; nginx serves all of it. This must be ReadWriteMany
+# unless every one of those pods lands on the same node.
+storage:
+  data:
+    existingClaim: ""
+    storageClassName: ""
+    accessModes:
+      - ReadWriteMany
+    size: 100Gi
+
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
+# Versions are pinned to match upstream's docker-compose.yml. The
+# upstream-drift workflow opens an issue when upstream changes them.
+
+postgres:
+  enabled: true
+  image: postgres:15-alpine
+  pullPolicy: IfNotPresent
+  # config/database.yml hardcodes both the username and the database name to
+  # "e621" in production. These are not configurable without patching the app.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+  persistence:
+    storageClassName: ""
+    size: 50Gi
+  # Set when postgres.enabled is false.
+  external:
+    host: ""
+    port: 5432
+
+redis:
+  enabled: true
+  image: redis:7.0.10-alpine
+  pullPolicy: IfNotPresent
+  # Holds sidekiq queues, unique-job locks, sidekiq-cron state and the IQDB
+  # circuit breaker. Losing it loses in-flight jobs, so it is persisted.
+  args:
+    - "--save"
+    - "10"
+    - "1"
+    - "--loglevel"
+    - "warning"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  persistence:
+    storageClassName: ""
+    size: 8Gi
+  external:
+    url: ""
+
+opensearch:
+  enabled: true
+  image: opensearchproject/opensearch:2.9.0
+  pullPolicy: IfNotPresent
+  javaOpts: "-Xms1g -Xmx1g"
+  # OpenSearch requires vm.max_map_count=262144. Most managed nodes do not set
+  # this. Enable the initContainer below only if your cluster allows privileged
+  # containers; otherwise tune the node with a DaemonSet or sysctl config.
+  setMaxMapCount: false
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 3Gi
+  persistence:
+    storageClassName: ""
+    size: 30Gi
+  external:
+    host: ""
+
+memcached:
+  enabled: true
+  image: memcached:1.5.22-alpine
+  pullPolicy: IfNotPresent
+  memoryLimitMb: 256
+  resources:
+    requests:
+      cpu: 50m
+      memory: 320Mi
+    limits:
+      memory: 512Mi
+  external:
+    servers: ""
+
+# Reverse image search. Backed by a single database file, so it is a
+# single-replica StatefulSet and cannot be scaled horizontally.
+iqdb:
+  enabled: true
+  image: ghcr.io/e621ng/iqdb:b988f000f17008677c7546c0c13623bc956b585d
+  pullPolicy: IfNotPresent
+  dbFile: /iqdb/e621_v2.db
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+  persistence:
+    storageClassName: ""
+    size: 20Gi
+
+# Standalone Rust service that answers /tags/autocomplete.json. It queries
+# Postgres directly and Rails has no route for that path, so nginx proxies it.
+autocompleted:
+  enabled: true
+  image: ghcr.io/e621ng/autocompleted:0.1.5
+  pullPolicy: IfNotPresent
+  replicas: 1
+  pgPoolMaxSize: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# -----------------------------------------------------------------------------
+# Bootstrap and migrations
+# -----------------------------------------------------------------------------
+bootstrap:
+  # post-install hook. Loads db/structure.sql, creates the OpenSearch indices
+  # (a separate step that db:schema:load does not cover) and seeds the admin and
+  # system users. Disable after the first install if you prefer to run it by hand.
+  enabled: true
+  # db:seed creates the admin account with the upstream default password.
+  # Change it immediately after install.
+  seed: true
+
+migrate:
+  # pre-upgrade hook running db:migrate.
+  enabled: true
+
+# -----------------------------------------------------------------------------
+# Application configuration
+# -----------------------------------------------------------------------------
+danbooru:
+  # Scalar settings exported as DANBOORU_<KEY>. Any method on
+  # Danbooru::Configuration can be overridden here.
+  #
+  # WARNING: values arrive in Ruby as Strings. Setting a numeric setting here
+  # (the upload karma thresholds in particular) makes Danbooru.config.validate!
+  # raise ArgumentError at boot. Numeric and non-scalar settings belong in
+  # localConfig below.
+  config:
+    app_name: "e621"
+    safe_mode: "false"
+    enable_signups: "true"
+
+  # Appended verbatim into config/danbooru_local_config.rb, which upstream
+  # requires unconditionally and ships as an empty stub. This is the only place
+  # non-scalar settings (storage_manager, max_file_sizes, karma thresholds,
+  # deletion_reasons, ...) can be set.
+  localConfig: |
+    # def upload_karma_l1_threshold
+    #   100
+    # end
+
+# Optional. SitemapGeneratorJob runs on a low_prio worker and writes into that
+# pod's own public/ directory, which nginx never sees, so /sitemap.xml.gz is
+# broken by default. Enabling this mounts an extra initializer that redirects
+# sitemap output into the shared data volume and adds the matching nginx alias.
+sitemap:
+  enabled: false

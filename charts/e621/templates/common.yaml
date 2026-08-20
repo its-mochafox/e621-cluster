@@ -1,0 +1,37 @@
+{{- if not .Values.storage.data.existingClaim }}
+# Shared post storage. Mounted read-write by the web pods and every jobs group,
+# read-only by the nginx sidecars. Jobs write originals, previews, samples,
+# crops and video variants; web writes avatars and replacements. This has to be
+# ReadWriteMany unless all of those pods are pinned to a single node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "e621.fullname" . }}-data
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+  annotations:
+    # Keep post data if the release is ever uninstalled.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.storage.data.accessModes | nindent 4 }}
+  {{- with .Values.storage.data.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.data.size }}
+{{- end }}
+{{- if .Values.serviceAccount.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "e621.serviceAccountName" . }}
+  labels:
+    {{- include "e621.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

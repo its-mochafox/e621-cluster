@@ -1,0 +1,19 @@
+apiVersion: v2
+name: e621
+description: e621ng on Kubernetes, tracking the upstream master branch
+type: application
+
+# Chart version. Bumped by hand when the chart itself changes.
+version: 0.1.0
+
+# The upstream app version this chart is known to work against. CI rewrites the
+# `master-<sha>` suffix when it publishes a new image, so this doubles as a
+# record of which upstream commit is currently deployed.
+appVersion: "master"
+
+home: https://github.com/RealMochaFox/e621-cluster
+sources:
+  - https://github.com/e621ng/e621ng
+
+maintainers:
+  - name: MochaFox
