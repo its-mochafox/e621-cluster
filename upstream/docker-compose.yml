@@ -92,6 +92,7 @@ services:
       - POSTGRES_HOST_AUTH_METHOD=trust
     volumes:
       - db_data:/var/lib/postgresql/data
+      - ./docker/create_eris_db.sql:/docker-entrypoint-initdb.d/create_eris_db.sql
     ports:
       - "${EXPOSED_POSTGRES_PORT:-34517}:5432"
   
@@ -123,10 +124,12 @@ services:
       test: curl "opensearch:9200/_cluster/health?wait_for_status=yellow&timeout=2s"
 
   iqdb:
-    image: ghcr.io/e621ng/iqdb:b988f000f17008677c7546c0c13623bc956b585d
-    command: iqdb http 0.0.0.0 5588 /iqdb/e621_v2.db
-    volumes:
-      - iqdb_data:/iqdb
+    image: ghcr.io/e621ng/eris:1.0.0
+    environment:
+      ERIS_DATABASE_URL: postgres://e621@postgres:5432/eris
+    depends_on:
+      postgres:
+        condition: service_started
   
   datadog-agent:
     image: datadog/agent:7.52.0
@@ -161,7 +164,7 @@ services:
 
   # Useful for development
 
-  tests:
+  rspec: &rspec
     image: e621
     environment:
       <<: *common-env
@@ -174,6 +177,12 @@ services:
     depends_on:
       <<: *common-depends-on
     entrypoint: bundle exec parallel_rspec --serialize-stdout --runtime-log tmp/spec_runtime.log
+    profiles:
+      - rspec
+
+  # Deprecated alias for `rspec`, kept for existing muscle memory and CI
+  tests:
+    <<: *rspec
     profiles:
       - tests
 
@@ -232,18 +241,38 @@ services:
     profiles: 
       - rubocop
 
-  linter:
+  eslint: &eslint
     image: e621
     volumes:
       - .:/app
       - node_modules:/app/node_modules
     entrypoint: npm run lint
-    profiles: 
+    profiles:
+      - eslint
+
+  # Deprecated alias for `eslint`, kept for existing muscle memory and CI
+  linter:
+    <<: *eslint
+    profiles:
       - linter
+
+  vitest: &vitest
+    image: e621
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    entrypoint: npm test
+    profiles:
+      - vitest
+
+  # Deprecated alias for `vitest`, kept for existing muscle memory and CI
+  jstests:
+    <<: *vitest
+    profiles:
+      - jstests
 
 volumes:
   post_data:
-  iqdb_data:
   opensearch_data:
   db_data:
   redis_data_v2:
