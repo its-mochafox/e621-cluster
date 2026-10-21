@@ -9,7 +9,7 @@ version: 0.1.0
 # The upstream app version this chart is known to work against. CI rewrites the
 # `master-<sha>` suffix when it publishes a new image, so this doubles as a
 # record of which upstream commit is currently deployed.
-appVersion: "master-1a467ccdb572"
+appVersion: "master-da51d7ae5d72"
 
 home: https://github.com/RealMochaFox/e621-cluster
 sources:
