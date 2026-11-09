@@ -11,7 +11,7 @@ RUN apk --no-cache add build-base cmake git glib-dev postgresql15-dev gcompat ra
 
 COPY Gemfile Gemfile.lock ./
 
-RUN BUNDLE_IGNORE_CONFIG=true bundle install -j$(nproc) \
+RUN BUNDLE_IGNORE_CONFIG=true BUNDLE_FROZEN=true bundle install -j$(nproc) \
  && rm -rf /usr/local/bundle/cache/*.gem \
  && find /usr/local/bundle/gems/ -name "*.c" -delete \
  && find /usr/local/bundle/gems/ -name "*.o" -delete
@@ -32,7 +32,7 @@ RUN npm ci
 
 FROM ruby:3.3.1-alpine3.20 AS development
 
-RUN apk --no-cache add vips \
+RUN apk --no-cache add vips vips-tools \
   postgresql15-client \
   git jemalloc tzdata \
   sudo gcompat ragel build-base \
@@ -113,9 +113,17 @@ FROM ruby:3.3.1-alpine3.20 AS production
 
 # Runtime dependencies only: no node, no build toolchain, no sudo, no git
 # (all gems come from rubygems; GitHelper reads DANBOORU_IMAGE_TAG instead).
-RUN apk --no-cache add vips \
+RUN apk --no-cache add vips vips-tools \
   postgresql15-client \
   jemalloc tzdata gcompat
+
+# Distrust the roots behind the compromised eMudhra intermediates
+# (we-have-a-problem.com, 2026-10-20). Alpine 3.20 is EOL and won't get the
+# fixed ca-certificates; drop this once the base moves to a patched Alpine.
+RUN sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
+  -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
+  /etc/ca-certificates.conf \
+  && update-ca-certificates
 
 COPY --from=mwader/static-ffmpeg:8.1.2 /ffmpeg /ffprobe /usr/bin/
 
